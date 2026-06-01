@@ -21,6 +21,7 @@ try:
     GUI = True
 except:
     GUI = False
+    # GUI flag indicates whether Qt-based GUI components are available
 
 try:
     import matplotlib.pyplot as plt
@@ -67,6 +68,7 @@ def logger_setup():
     #logger.handlers[1].stream = sys.stdout
 
     return logger, log_file
+    # returns logger and the path to the log file for external use
 
 
 from . import utils, plot, transforms
@@ -198,6 +200,9 @@ def imread(filename):
             io_logger.critical("ERROR: could not read masks from file, %s" % e)
             return None
 
+    # imread supports TIFF (multi-page), DAX (via .inf metadata), nd2/nrrd
+    # and generic images; for .npy it expects a dict-like object with key "masks".
+
 
 def remove_model(filename, delete=False):
     """ remove model from .cellpose custom model list """
@@ -321,6 +326,9 @@ def get_image_files(folder, mask_filter, imf=None, look_one_level_down=False):
 
     return image_names
 
+    # get_image_files: finds images while excluding files that look like label/flow outputs
+    # mask_filters are suffixes that indicate non-image files to ignore.
+
 
 def get_label_files(image_names, mask_filter, imf=None):
     """
@@ -351,6 +359,8 @@ def get_label_files(image_names, mask_filter, imf=None):
         io_logger.info(
             "not all flows are present, running flow generation for all images")
         flow_names = None
+    # If per-image precomputed flows exist ("_flows.tif") prefer those; otherwise
+    # set flow_names to None so downstream code knows to generate flows.
 
     # check for masks
     if mask_filter == "_seg.npy":
@@ -379,6 +389,9 @@ def get_label_files(image_names, mask_filter, imf=None):
             label_names = None
 
     return label_names, flow_names
+
+    # get_label_files returns (label_files or None, flow_files or None). If labels
+    # are missing but flow files exist, labels will be None and flows used instead.
 
 
 def load_images_labels(tdir, mask_filter="_masks", image_filter=None,
@@ -421,6 +434,9 @@ def load_images_labels(tdir, mask_filter="_masks", image_filter=None,
             k += 1
     io_logger.info(f"{k} / {nimg} images in {tdir} folder have labels")
     return images, labels, image_names
+
+    # load_images_labels: returns aligned lists of images and labels/flows ready
+    # for training; if precomputed flows exist they are used in place of labels.
 
 def load_train_test_data(train_dir, test_dir=None, image_filter=None,
                          mask_filter="_masks", look_one_level_down=False):
@@ -532,6 +548,9 @@ def masks_flows_to_seg(images, masks, flows, file_names, diams=30.,
         dat["img_restore"] = imgs_restore
 
     np.save(base + "_seg.npy", dat)
+
+    # masks_flows_to_seg: converts model outputs (masks+flows) into a .npy file
+    # containing outlines, masks, flows and metadata used by the GUI and server.
 
 def save_to_png(images, masks, flows, file_names):
     """ deprecated (runs io.save_masks with png=True) 
