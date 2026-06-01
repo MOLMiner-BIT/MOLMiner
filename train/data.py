@@ -16,11 +16,13 @@ def labels_to_flows(instances, niter=None, device="cuda"):
     if instances.ndim < 3:
         instances = instances[np.newaxis, :, :] 
 
-    # flows need to be recomputed
+    # Ensure we have a 3D array (batch, H, W) for the masks
     instances = fastremap.renumber(instances, in_place=True)[0]
+    # Compute gradient/flow vectors from instance masks using Cellpose utility
     veci = masks_to_flows(instances[0].astype(int), device=device, niter=niter)
 
-    # concatenate labels, distance transform, vector flows, heat (boundary and mask are computed in augmentations)
+    # Concatenate binary mask, vector flows and other channels expected by the model
+    # Result shape: (channels, H, W) as float32
     flows = np.concatenate((instances > 0.5, veci),
                            axis=0).astype(np.float32)
     return flows
@@ -46,7 +48,9 @@ class EMPSDataset(Dataset):
             image_fns = os.listdir(os.path.join(self.base_dir, 'images'))
             for img in image_fns:
                 if img.endswith('.png'):
+                    # Load label file to confirm it exists and is readable, then add to list
                     labels = np.array(Image.open(os.path.join(self.base_dir, "segmaps", img)))
+                    # tuple: (directory, filename, is_fully_labeled)
                     self.image_fns.append((self.base_dir, img, True))
             print('[INFO] add real data:', len(self.image_fns))
 
@@ -57,9 +61,8 @@ class EMPSDataset(Dataset):
             for exp in os.listdir(extra_data_base):
                 if os.path.isdir(os.path.join(extra_data_base, exp)):
                     for img in tqdm(os.listdir(os.path.join(extra_data_base, exp, 'images')), desc=exp):
+                        # verify label exists for the extra dataset and add it
                         labels = np.array(Image.open(os.path.join(extra_data_base, exp, "segmaps", img)))
-                        # if labels.max() < 600:
-                        #     self.image_fns.append((os.path.join(extra_data_base, exp), img, True))
                         self.image_fns.append((os.path.join(extra_data_base, exp), img, True))
             print('[INFO] add extra data:', len(self.image_fns) - num)
             
@@ -67,6 +70,7 @@ class EMPSDataset(Dataset):
             num = len(self.image_fns)
             extra_data_base = os.path.join(data_dir, 'weak_data')
             for img in os.listdir(os.path.join(extra_data_base, 'images')):
+                # weakly labeled images: mark as not fully labeled (False)
                 self.image_fns.append((extra_data_base, img, False))
             print('[INFO] add weak data:', len(self.image_fns) - num)
 
@@ -79,17 +83,21 @@ class EMPSDataset(Dataset):
         image = Image.open(
             os.path.join(self.image_fns[idx][0], 'images', self.image_fns[idx][1])
         )
+        # Load and resize input image to target training size, ensure 3 channels
         image = image.resize(self.im_size, resample=Image.BICUBIC).convert("RGB")
         
         if self.image_fns[idx][2]:
             instances = Image.open(
                 os.path.join(self.image_fns[idx][0], 'segmaps', self.image_fns[idx][1])
             ).resize(self.im_size, resample=Image.NEAREST)
+            # Full instance masks: create a binary foreground label image
             labels = Image.fromarray((np.array(instances) > 0).astype(np.uint8))
         else:
             # 需要检查一下
+            # Weakly labeled data format: image contains concatenated (instances | labels)
             masks = cv2.imread(os.path.join(self.image_fns[idx][0], 'weak_labels', self.image_fns[idx][1]), 0)
             W = int(masks.shape[1] / 2)
+            # left half: instance masks; right half: binary labels
             instances = Image.fromarray((masks[:, :W] > 0).astype(np.uint8)).resize(self.im_size, resample=Image.NEAREST)
             labels = Image.fromarray((masks[:, W:] > 0).astype(np.uint8)).resize(self.im_size, resample=Image.NEAREST)
             
@@ -109,48 +117,52 @@ class EMPSDataset(Dataset):
             # if np.random.uniform() < 0.5:
             #     brightEnhancer = ImageEnhance.Brightness(image)
             #     image = brightEnhancer.enhance(np.random.uniform() * 0.7 + 0.5)
-            # hor-ver flip
+            # horizontal and vertical flips (data augmentation)
             image, instances, labels = self.horizontal_flip(image, instances, labels)
             image, instances, labels = self.vertical_flip(image, instances, labels)
 
-            # rotate
+            # random 90/180/270 degree rotations
             image, instances, labels = self.random_rotation(image, instances, labels)
 
-            # colour jitter
+            # optional color inversion for robustness
             # image = self.colour_jitter(image)
             if self.inverse_image and np.random.uniform() < 0.5:
                 image = PIL.ImageOps.invert(image)
 
-            # random crop
+            # random crop to introduce scale/translation variation
             image, instances, labels = self.random_crop(image, instances, labels)
             
-            # random expand
+            # random expand (pad after downscaling) to simulate smaller objects
             if self.expand_image:
                 image, instances, labels = self.expand(image, instances, labels)
 
-            # tile
+            # occasional tiling to create repeated-pattern images
             image, instances, labels = self.tile(image, instances, labels)
 
-        # scale
+        # Convert image to float tensor in CHW order and normalize to [0,1]
         image = np.array(image) / 255.0
-
         image = torch.FloatTensor(image).permute(2, 0, 1)
-        
+
+        # For fully labeled data compute cell flows; for weak data return zero flows
         if is_full_labeled:
             flows = labels_to_flows(np.array(instances), device=torch.device("cuda"))
             flows = torch.tensor(flows)
         else:
+            # keep flows shape compatible with image when unlabeled
             flows = torch.zeros_like(image)
-        
+
+        # Convert masks/labels to tensor types expected by training code
         instances = torch.LongTensor(np.array(instances))
         labels = torch.ByteTensor(np.array(labels))
 
+        # Return: image tensor, instance mask, binary label, flows, is_full_labeled flag
         return image, instances, labels, flows, is_full_labeled
 
     def __len__(self):
         return len(self.image_fns)
 
     def horizontal_flip(self, image, instances, labels, p=0.5):
+        # Apply horizontal flip to image and corresponding masks
         if np.random.uniform() < p:
             image = self.hor_flip(image)
             instances = self.hor_flip(instances)
@@ -171,6 +183,7 @@ class EMPSDataset(Dataset):
         return image, instances, labels
 
     def vertical_flip(self, image, instances, labels, p=0.5):
+        # Apply vertical flip to image and masks
         if np.random.uniform() < p:
             image = self.vert_flip(image)
             instances = self.vert_flip(instances)
