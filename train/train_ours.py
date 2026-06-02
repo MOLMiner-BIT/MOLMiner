@@ -15,20 +15,27 @@ from tqdm import tqdm
 import torch.nn as nn
 
 def compute_decay_rate(start_lr, end_lr, epochs):
+    # compute multiplicative decay factor per epoch to move from start_lr to end_lr
     return np.exp(np.log(end_lr/start_lr)/epochs)
 
 def _loss_fn_seg(lbl, y, device):
     criterion = nn.MSELoss(reduction="mean")
     criterion2 = nn.BCEWithLogitsLoss(reduction="mean")
+    # lbl is expected to contain binary mask in channel 0 and flow targets in channels 1:
+    # scale flows by a constant (5.0) to match network target range
     veci = 5. * lbl[:, 1:]
+    # L2 loss for vector flow components
     loss = criterion(y[:, :2], veci)
     loss /= 2.
+    # BCE loss for cell probability / mask channel using logits output
     loss2 = criterion2(y[:, -1], (lbl[:, 0] > 0.5).float())
     loss = loss + loss2
     return loss
 
 def _loss_fn_weak(lbl1, lbl2, y, device):
     criterion2 = nn.BCEWithLogitsLoss(reduction="mean")
+    # weak supervision loss: only compute BCE on pixels where lbl1 indicates
+    # absence (<0.5) to avoid contradicting fully-labeled regions
     valid_lbl = lbl2[lbl1 < 0.5]
     valid_y = y[:, -1][lbl1 < 0.5]
     loss2 = criterion2(valid_y, (valid_lbl > 0.5).float())
@@ -74,6 +81,7 @@ if __name__ == '__main__':
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1)
     
+    # build test arrays once for evaluation using the Cellpose API (list of numpy arrays)
     for (images, instances, _, _, is_full_labeled) in tqdm(test_loader):
         test_data.append(images.cpu().numpy())
         test_labels.append(instances.cpu().numpy())
@@ -110,10 +118,12 @@ if __name__ == '__main__':
             is_full_labeled = is_full_labeled.to(device)
 
             y = network(images)[0]
+            # compute supervised loss on fully labeled samples
             if is_full_labeled.sum() > 0:
                 loss = _loss_fn_seg(flows[is_full_labeled], y[is_full_labeled], device)
             else:
                 loss = 0.0
+            # compute weak supervision loss on partially/weakly labeled samples
             not_full_labeled = torch.logical_not(is_full_labeled)
             if not_full_labeled.sum() > 0:
                 loss += _loss_fn_weak(instances[not_full_labeled], segmaps[not_full_labeled], y[not_full_labeled], device)
@@ -124,8 +134,8 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
         
+        # run inference on the collected test set and compute metrics
         masks = model.eval(test_data)[0]
-        # check performance using ground truth labels
         miou, ap = metrics.average_precision(test_labels, masks)[:2]
             
         ap50 = ap[:,0].mean()
