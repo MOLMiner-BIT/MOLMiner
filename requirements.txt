@@ -12,3 +12,4 @@ fastremap
 cellpose
 roifile
 pyqt5
+easyocr>=1.7.0
