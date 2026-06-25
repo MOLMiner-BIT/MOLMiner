@@ -683,6 +683,8 @@ def get_masks(p, iscell=None, rpad=20):
     edges = []
     shape0 = p.shape[1:]
     dims = len(p)
+
+    # If iscell is provided, keep non-cell pixels fixed at their original coordinates.
     if iscell is not None:
         if dims == 3:
             inds = np.meshgrid(np.arange(shape0[0]), np.arange(shape0[1]),
@@ -693,15 +695,20 @@ def get_masks(p, iscell=None, rpad=20):
         for i in range(dims):
             p[i, ~iscell] = inds[i][~iscell]
 
+    # Flatten each flow component and build histogram bin edges with padding.
     for i in range(dims):
         pflows.append(p[i].flatten().astype("int32"))
         edges.append(np.arange(-.5 - rpad, shape0[i] + .5 + rpad, 1))
 
+    # Build a multidimensional histogram of final pixel locations.
     h, _ = np.histogramdd(tuple(pflows), bins=edges)
     hmax = h.copy()
+
+    # Smooth the histogram locally to find peaks.
     for i in range(dims):
         hmax = maximum_filter1d(hmax, 5, axis=i)
 
+    # Identify local maxima as mask seeds.
     seeds = np.nonzero(np.logical_and(h - hmax > -1e-6, h > 10))
     Nmax = h[seeds]
     isort = np.argsort(Nmax)[::-1]
@@ -716,6 +723,7 @@ def get_masks(p, iscell=None, rpad=20):
     else:
         expand = np.nonzero(np.ones((3, 3)))
 
+    # Expand each seed region to nearby voxels/pixels supported by the histogram.
     for iter in range(5):
         for k in range(len(pix)):
             if iter == 0:
@@ -737,21 +745,25 @@ def get_masks(p, iscell=None, rpad=20):
             if iter == 4:
                 pix[k] = tuple(pix[k])
 
+    # Build the label image from all expanded mask regions.
     M = np.zeros(h.shape, np.uint32)
     for k in range(len(pix)):
         M[pix[k]] = 1 + k
 
+    # Shift flow coordinates back to histogram coordinates.
     for i in range(dims):
         pflows[i] = pflows[i] + rpad
     M0 = M[tuple(pflows)]
 
-    # remove big masks
+    # Remove very large masks that likely correspond to background artifacts.
     uniq, counts = fastremap.unique(M0, return_counts=True)
     big = np.prod(shape0) * 0.4
     bigc = uniq[counts > big]
     if len(bigc) > 0 and (len(bigc) > 1 or bigc[0] != 0):
         M0 = fastremap.mask(M0, bigc)
-    fastremap.renumber(M0, in_place=True)  #convenient to guarantee non-skipped labels
+
+    # Renumber labels to keep them consecutive and compact.
+    fastremap.renumber(M0, in_place=True)  # convenient to guarantee non-skipped labels
     M0 = np.reshape(M0, shape0)
     return M0
 
@@ -812,10 +824,11 @@ def compute_masks(dP, cellprob, p=None, niter=200, cellprob_threshold=0.0,
     Returns:
         tuple: A tuple containing the computed masks and the final pixel locations.
     """
+    # Build a binary mask of pixels whose cell probability exceeds the threshold.
     cp_mask = cellprob > cellprob_threshold
 
-    if np.any(cp_mask):  #mask at this point is a cell cluster binary map, not labels
-        # follow flows
+    if np.any(cp_mask):  # mask at this point is a cell cluster binary map, not labels
+        # Follow the flow field to estimate pixel trajectories.
         if p is None:
             p, inds = follow_flows(dP * cp_mask / 5., niter=niter, interp=interp,
                                    device=device)
@@ -826,16 +839,17 @@ def compute_masks(dP, cellprob, p=None, niter=200, cellprob_threshold=0.0,
                 p = np.zeros((len(shape), *shape), np.uint16)
                 return mask, p
 
-        #calculate masks
+        # Convert the flow-following result into connected masks.
         mask = get_masks(p, iscell=cp_mask)
 
-        # flow thresholding factored out of get_masks
+        # Apply flow-based quality control after mask generation.
         if not do_3D:
             if mask.max() > 0 and flow_threshold is not None and flow_threshold > 0:
-                # make sure labels are unique at output of get_masks
+                # Ensure labels remain unique after filtering bad flow masks.
                 mask = remove_bad_flow_masks(mask, dP, threshold=flow_threshold,
                                              device=device)
 
+        # Recast mask dtype based on the number of labels.
         if mask.max() > 2**16 - 1:
             recast = True
             mask = mask.astype(np.float32)
@@ -850,14 +864,17 @@ def compute_masks(dP, cellprob, p=None, niter=200, cellprob_threshold=0.0,
             mask = mask.astype(np.uint16)
 
     else:  # nothing to compute, just make it compatible
+        # Return empty outputs when no cell pixels are detected.
         dynamics_logger.info("No cell pixels found.")
         shape = cellprob.shape
         mask = np.zeros(cellprob.shape, np.uint16)
         p = np.zeros((len(shape), *shape), np.uint16)
         return mask, p
 
+    # Fill small holes and remove masks below the minimum size.
     mask = utils.fill_holes_and_remove_small_masks(mask, min_size=min_size)
 
+    # Warn when the number of masks exceeds uint16 capacity.
     if mask.dtype == np.uint32:
         dynamics_logger.warning(
             "more than 65535 masks in image, masks returned as np.uint32")
