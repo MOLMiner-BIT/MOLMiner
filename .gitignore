@@ -16,3 +16,4 @@ preprocess/mmdet.egg-info
 preprocess/weightscellpose/key/*.json
 cellpose/key/*.json
 cellpose/key/*.json
+segmentation/cellpose/key/*.json
